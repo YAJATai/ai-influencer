@@ -15,7 +15,8 @@
       "Bash(cp \"/Users/alec/Downloads/hf_20260309_132059_4637a9d4-9fcb-42d4-ab4f-6f182a256232.png\"  \"/Users/alec/Desktop/Ai Influencer/public/inf/i5.png\")",
       "Bash(git init *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(git rm *)"
     ]
   }
 }
