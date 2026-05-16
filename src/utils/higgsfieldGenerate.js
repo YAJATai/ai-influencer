@@ -4,7 +4,17 @@ const MCP_URL = '/api/hf/mcp'
 const PENDING_KEY = 'hf_pending_gens'
 
 let _sessionId = null
-const _mediaCache = new Map() // fingerprint → uploaded CDN URL, lives for the browser session
+
+// Persistent media cache — survives page reloads so reference images are never re-uploaded
+const MEDIA_CACHE_KEY = 'hf_media_cache'
+const _mediaCache = (() => {
+  try { return new Map(Object.entries(JSON.parse(localStorage.getItem(MEDIA_CACHE_KEY) || '{}'))) }
+  catch { return new Map() }
+})()
+function _mediaCacheSave() {
+  try { localStorage.setItem(MEDIA_CACHE_KEY, JSON.stringify(Object.fromEntries(_mediaCache))) }
+  catch { /* quota full — cache in memory only */ }
+}
 
 function mediaFingerprint(dataUrl) {
   return `${dataUrl.length}:${dataUrl.slice(0, 48)}:${dataUrl.slice(-24)}`
@@ -38,7 +48,12 @@ async function mcpPost(body, isRetry = false) {
   }
   if (_sessionId) headers['Mcp-Session-Id'] = _sessionId
 
-  const res = await fetch(MCP_URL, { method: 'POST', headers, body: JSON.stringify(body) })
+  let res
+  try {
+    res = await fetch(MCP_URL, { method: 'POST', headers, body: JSON.stringify(body) })
+  } catch {
+    throw new Error('Connection error — check your internet connection or reconnect Higgsfield in Settings')
+  }
 
   if (res.status === 401) {
     if (isRetry) throw new Error('Higgsfield session expired — please reconnect in Settings')
@@ -59,12 +74,17 @@ async function mcpPost(body, isRetry = false) {
   if (sid) _sessionId = sid
 
   const ct = res.headers.get('content-type') || ''
+  console.log('[HF] content-type:', ct)
+
+  // Stream SSE responses in real-time so we don't wait for the server to close
+  // the stream — video generate_video calls can hold the stream open for minutes
+  if (ct.includes('text/event-stream')) {
+    return parseSSEStream(res)
+  }
+
   const rawText = await res.text()
   console.log('[HF] raw body:', rawText.slice(0, 600))
-
-  if (ct.includes('text/event-stream') || rawText.trimStart().startsWith('data:')) {
-    return parseSSEText(rawText)
-  }
+  if (rawText.trimStart().startsWith('data:')) return parseSSEText(rawText)
   try { return JSON.parse(rawText) } catch { return rawText }
 }
 
@@ -80,10 +100,48 @@ function parseSSEText(text) {
       const d = JSON.parse(raw)
       if (d !== null) {
         lastNonNull = d
-        // Prefer events that carry an actual tool result, not notifications
         if (d.result !== undefined) resultEvent = d
       }
     } catch {}
+  }
+  return resultEvent ?? lastNonNull
+}
+
+// Stream SSE events in real-time — returns as soon as the first result event arrives,
+// without waiting for the server to close the stream (which can take minutes for video jobs)
+async function parseSSEStream(response) {
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let lastNonNull = null
+  let resultEvent = null
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('data:')) continue
+        const raw = trimmed.slice(5).trim()
+        if (!raw || raw === '[DONE]') continue
+        try {
+          const d = JSON.parse(raw)
+          if (d !== null) {
+            lastNonNull = d
+            if (d.result !== undefined) {
+              resultEvent = d
+              reader.cancel().catch(() => {})
+              return resultEvent
+            }
+          }
+        } catch {}
+      }
+    }
+  } catch {
+    if (resultEvent) return resultEvent
   }
   return resultEvent ?? lastNonNull
 }
@@ -157,16 +215,16 @@ function extractVideoUrls(result) {
 
 async function pollVideoJobs(jobIds, total, onProgress, onPartialResults, isCancelled) {
   let lastPartialCount = 0
-  for (let i = 0; i < 180; i++) { // 180 × 3s = 9 minutes max
+  for (let i = 0; i < 360; i++) { // 360 × 1.5s = 9 minutes max
     if (isCancelled?.()) throw new Error('CANCELLED')
-    if (i > 0) await new Promise(r => setTimeout(r, 3000))
+    if (i > 0) await new Promise(r => setTimeout(r, 1500))
     if (isCancelled?.()) throw new Error('CANCELLED')
     try {
       const display = await callTool('job_display', { ids: jobIds })
       const urls = extractVideoUrls(display)
       const terminal = countTerminalJobs(display)
       console.log(`[HF] video poll ${i} → ${urls.length} URLs, ${terminal}/${total} terminal`)
-      onProgress?.(Math.min(30 + (urls.length / total) * 65, 95))
+      onProgress?.(Math.min(35 + (urls.length / total) * 60, 95))
       // Fire partial results callback whenever new URLs arrive
       if (urls.length > lastPartialCount) {
         lastPartialCount = urls.length
@@ -217,11 +275,11 @@ async function uploadAudioFile(dataUrl) {
   const confirmResult = await callTool('media_confirm', { media_id: mediaId, type: 'audio' })
   const confirmed = unwrapMCP(confirmResult)
   const cdnUrl = confirmed?.url || confirmed?.media_url || confirmed?.rawUrl || confirmed?.cdn_url || mediaId
-  _mediaCache.set(fp, cdnUrl)
+  _mediaCache.set(fp, cdnUrl); _mediaCacheSave()
   return cdnUrl
 }
 
-export async function generateVideo({ prompt, aspectRatio = '9:16', duration = 8, count = 1, referenceImages = [], audioRef = null, model = 'seedance_2_0', onProgress, onPartialResults, isCancelled }) {
+export async function generateVideo({ prompt, aspectRatio = '9:16', duration = 8, count = 1, referenceImages = [], audioRef = null, model = 'seedance_2_0', resolution = '1080p', onProgress, onPartialResults, isCancelled }) {
   await initSession()
   onProgress?.(5)
 
@@ -255,7 +313,7 @@ export async function generateVideo({ prompt, aspectRatio = '9:16', duration = 8
     prompt,
     aspect_ratio: aspectRatio,
     duration,
-    resolution: '1080p',
+    resolution,
     mode: 'std',
   }
   if (medias.length) params.medias = medias
@@ -429,16 +487,16 @@ async function uploadRefImage(dataUrl) {
 
   // Structured response
   const cdnUrl = confirmed?.url || confirmed?.media_url || confirmed?.rawUrl || confirmed?.cdn_url
-  if (cdnUrl) { _mediaCache.set(fp, cdnUrl); return cdnUrl }
+  if (cdnUrl) { _mediaCache.set(fp, cdnUrl); _mediaCacheSave(); return cdnUrl }
 
   // Text response — extract URL or fall back to media_id
   if (typeof confirmed === 'string') {
     const urlMatch = confirmed.match(/https:\/\/[^\s"'\\]+/)
-    if (urlMatch) { _mediaCache.set(fp, urlMatch[0]); return urlMatch[0] }
+    if (urlMatch) { _mediaCache.set(fp, urlMatch[0]); _mediaCacheSave(); return urlMatch[0] }
   }
 
   const fallback = confirmed?.media_id || confirmed?.id || mediaId
-  _mediaCache.set(fp, fallback)
+  _mediaCache.set(fp, fallback); _mediaCacheSave()
   return fallback
 }
 

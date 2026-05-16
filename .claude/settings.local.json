@@ -8,6 +8,7 @@
       "Bash(curl -s http://localhost:5173)",
       "Bash(npx vite *)",
       "Bash(lsof -ti:5173)",
+      "Bash(lsof -i :5173)",
       "Bash(cp \"/Users/alec/Downloads/hf_20260123_115549_918618ed-8658-4655-af88-593591999949.png\"  \"/Users/alec/Desktop/Ai Influencer/public/inf/i1.png\")",
       "Bash(cp \"/Users/alec/Downloads/hf_20260207_165022_521146a4-0198-4852-b41b-b53b36d52258.png\"  \"/Users/alec/Desktop/Ai Influencer/public/inf/i2.png\")",
       "Bash(cp \"/Users/alec/Downloads/hf_20260211_121637_595a4039-0afc-45fc-b6fd-cc7db16f766e.jpeg\" \"/Users/alec/Desktop/Ai Influencer/public/inf/i3.jpg\")",
@@ -23,6 +24,14 @@
       "mcp__claude_ai_Higgsfield__generate_image",
       "mcp__claude_ai_Higgsfield__job_status",
       "mcp__claude_ai_Higgsfield__models_explore",
+      "mcp__claude_ai_Higgsfield__media_upload",
+      "mcp__claude_ai_Higgsfield__media_confirm",
+      "mcp__claude_ai_Higgsfield__show_generations",
+      "mcp__claude_ai_Higgsfield__list_workspaces",
+      "mcp__claude_ai_Higgsfield__select_workspace",
+      "mcp__claude_ai_Higgsfield__show_characters",
+      "mcp__claude_ai_Higgsfield__show_medias",
+      "mcp__claude_ai_Higgsfield__virality_predictor",
       "Bash(cp \"/Users/alec/Downloads/hf_20260514_062307_7deea82f-50d5-44fe-9d5a-f29a159a6907.png\" \"/Users/alec/Desktop/Ai Influencer/public/inf/i15.png\")",
       "Bash(cp \"/Users/alec/Downloads/hf_20260514_062115_66a4e064-08ef-4f28-94bb-a098d4c7f470.png\" \"/Users/alec/Desktop/Ai Influencer/public/inf/i16.png\")",
       "WebSearch",
@@ -33,7 +42,8 @@
       "Bash(cp \"/Users/alec/Downloads/hf_20260514_102439_212d1a9b-487c-47b3-aeed-76ac385cd4c5.png\" \"/Users/alec/Desktop/Ai Influencer/public/kayla/main.png\")",
       "Bash(cp \"/Users/alec/Downloads/hf_20260514_105228_1f07a68f-bfa5-4618-9b5b-c012902da9e2.png\" \"/Users/alec/Desktop/Ai Influencer/public/kayla/sheet.png\")",
       "Bash(cp \"/Users/alec/Downloads/hf_20260514_130803_ad9c89b2-8144-4417-bc59-2c06c54096bc.png\" \"/Users/alec/Desktop/Ai Influencer/public/kayla/closeup1.png\")",
-      "Bash(cp \"/Users/alec/Downloads/hf_20260515_040254_42c38d5c-e5e6-48f8-975d-0c9e4c7bc646.png\" \"/Users/alec/Desktop/Ai Influencer/public/kayla/closeup2.png\")"
+      "Bash(cp \"/Users/alec/Downloads/hf_20260515_040254_42c38d5c-e5e6-48f8-975d-0c9e4c7bc646.png\" \"/Users/alec/Desktop/Ai Influencer/public/kayla/closeup2.png\")",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

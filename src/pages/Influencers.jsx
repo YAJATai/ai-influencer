@@ -1444,7 +1444,7 @@ const CS_ENV_PRESETS = {
   'Studio':     'Clean minimal studio, controlled neutral background, no distractions. Soft box key ~5600K from camera-left, fill from camera-right.',
 }
 const CS_CAMERAS = [
-  'Handheld','Tripod','Wide','Overhead',
+  'Handheld','Tripod','Talking Head',
 ]
 const CS_VIBES = [
   'Natural','Energetic','Luxury','Playful','Tutorial','Dramatic','Cozy','Confident',
@@ -1517,10 +1517,11 @@ const DIALOGUE_STARTERS = [
 ]
 
 const CAMERA_META = {
-  'Handheld': { label: 'Handheld' },
-  'Tripod':   { label: 'Tripod' },
-  'Wide':     { label: 'Wide' },
-  'Overhead': { label: 'Overhead' },
+  'Handheld':     { label: 'Handheld' },
+  'Tripod':       { label: 'Tripod' },
+  'Talking Head': { label: 'Talking Head' },
+  'Wide':         { label: 'Wide' },
+  'Overhead':     { label: 'Overhead' },
 }
 
 const VIBE_META = {
@@ -1618,12 +1619,70 @@ function CSProductSlot({ value, onChange, dragOver, setDragOver, fileRef, label 
 }
 
 // ─────────────────────────────────────────────
+// Parse additional notes into action beats (injected into ACTION block) and direction notes (DIRECTION section)
+function parseAdditionalNotes(notes, durationSecs) {
+  if (!notes.trim()) return { actionBeats: [], directionNotes: '' }
+
+  const sentences = notes.trim()
+    .split(/(?<=[.!?])\s+|[\n]+/)
+    .map(s => s.trim())
+    .filter(Boolean)
+
+  const actionBeats = []
+  const directionLines = []
+
+  const ACTION_VERBS = /\b(pick|picks up|hold|holds|turn|turns|spin|spins|lean|leans|look|looks at|walk|walks|sit|sits|stand|stands|laugh|laughs|smile|smiles|nod|nods|wave|waves|point|points|reach|reaches|touch|touches|grab|grabs|show|shows|open|opens|close|closes|tilt|tilts|adjust|adjusts|pull|pulls|lift|lifts|flip|flips|drop|drops|step|steps|crouch|crouches|glance|glances|wink|winks|pause|pauses|freeze|freezes|stop|stops)\b/i
+
+  for (const s of sentences) {
+    const isActionBeat = ACTION_VERBS.test(s) || /\b(she|he|they)\s+\w+/i.test(s) || /\bpause\b/i.test(s)
+
+    if (isActionBeat) {
+      // Determine position as a fraction 0–1 of the video/dialogue
+      let fraction = 0.5 // default: middle of dialogue
+      let ts = `0:${String(Math.round(durationSecs * 0.5)).padStart(2, '0')}`
+
+      if (/\bat (the )?start\b|from the start|at the beginning|^first\b/i.test(s)) {
+        fraction = 0; ts = '0:01'
+      } else if (/\bat (the )?end\b|last|final|before (it )?cuts/i.test(s)) {
+        fraction = 1; ts = `0:${String(Math.max(durationSecs - 2, 1)).padStart(2, '0')}`
+      } else {
+        const m = s.match(/at\s+(\d+)\s*s(?:ec(?:ond)?s?)?/i)
+        if (m) {
+          const sec = parseInt(m[1])
+          fraction = Math.min(sec / durationSecs, 1)
+          ts = `0:${String(sec).padStart(2, '0')}`
+        }
+      }
+
+      let text = s
+        .replace(/at (the )?(start|end|beginning)\b[,]?/gi, '')
+        .replace(/from the start\b[,]?/gi, '')
+        .replace(/at \d+\s*s(ec(ond)?s?)?\b[,]?/gi, '')
+        .replace(/^(make sure|ensure|have her|have him|i want|please|note[:]?)\s+/i, '')
+        .trim()
+        .replace(/[.!?]+$/, '')
+
+      if (!/^(she|he|they)\b/i.test(text)) text = `She ${text.charAt(0).toLowerCase()}${text.slice(1)}`
+
+      actionBeats.push({ text, timestamp: ts, fraction, fired: false })
+    } else {
+      directionLines.push(s.replace(/[.!?]+$/, '').trim())
+    }
+  }
+
+  // Sort beats by fraction so they fire in chronological order
+  actionBeats.sort((a, b) => a.fraction - b.fraction)
+
+  return { actionBeats, directionNotes: directionLines.join('. ').trim() }
+}
+
+// ─────────────────────────────────────────────
 // Dialogue annotation — reads the raw script and wraps it with performance notation
 // following the MD guide: emotion before line, [beat]/[breath] pauses, product tilts,
 // micro-expressions (max 2), CTA lands like a friend's tip not a pitch.
 // productTag = the @image_N string for the product (e.g. '@image_5'), or null
 // isHandheld = true when the subject is self-filming while walking
-function annotateDialogue(rawText, productTag, durationSecs, isHandheld = false) {
+function annotateDialogue(rawText, productTag, durationSecs, isHandheld = false, wearMode = false, actionBeats = []) {
   if (!rawText.trim()) return ''
 
   // Split into clauses:
@@ -1641,17 +1700,55 @@ function annotateDialogue(rawText, productTag, durationSecs, isHandheld = false)
   const prod = productTag || null
   const out = []
 
-  // Opening body state — already in pose, product in hand if applicable
+  // Worn-mode: rotate through natural interaction gestures so every 2nd sentence
+  // has a physical beat with the product — keeps it visible without feeling staged.
+  // All gestures are body-position-agnostic so they work for any wearable
+  // (cap, bracelet, necklace, shirt, shoes, earrings, sunglasses, etc.)
+  const WORN_GESTURES = prod ? [
+    `She touches ${prod} briefly — natural, not staged.`,
+    `Her hand goes to ${prod} for a beat, then back to natural position.`,
+    `She glances toward ${prod}, then back to lens — draws attention to it without words.`,
+    `She adjusts ${prod} slightly — natural reflex, eyes stay on camera.`,
+    `She angles her body so ${prod} is clearly visible, then settles back.`,
+  ] : []
+  let wornGestureIdx = 0
+  let wornGestureCounter = 0
+  let wornGesturesUsed = 0
+  const wornGestureMax = durationSecs <= 6 ? 1 : 2
+  function maybeWornGesture() {
+    if (!wearMode || !prod) return null
+    if (wornGesturesUsed >= wornGestureMax) return null
+    wornGestureCounter++
+    if (wornGestureCounter % 3 !== 0) return null
+    const g = WORN_GESTURES[wornGestureIdx % WORN_GESTURES.length]
+    wornGestureIdx++
+    wornGesturesUsed++
+    return g
+  }
+
+  // Opening body state — already in pose, product worn or in hand as applicable
   if (isHandheld) {
     out.push(prod
-      ? `@image_1 is self-filming — holding the phone in one hand, ${prod} in the other. She is already walking. Camera bobs with her steps from 0:00. One breath before she speaks.`
+      ? wearMode
+        ? `@image_1 is self-filming — holding the phone in one hand, ${prod} worn. She is already walking. Camera bobs with her steps from 0:00. One breath before she speaks.`
+        : `@image_1 is self-filming — holding the phone in one hand, ${prod} in the other. She is already walking. Camera bobs with her steps from 0:00. One breath before she speaks.`
       : `@image_1 is self-filming — holding the phone at arm's length, already walking. Camera bobs with her steps from 0:00. One breath before she speaks.`
     )
   } else {
     out.push(prod
-      ? `@image_1 faces camera, ${prod} in hand from 0:00. One breath before she starts.`
+      ? wearMode
+        ? `@image_1 faces camera, ${prod} worn from 0:00. She touches or adjusts ${prod} once early — natural reflex that draws attention to it. One breath before she starts.`
+        : `@image_1 faces camera, ${prod} in hand from 0:00. One breath before she starts.`
       : `@image_1 faces camera. Eyes on lens. One breath.`
     )
+  }
+
+  // Fire "at start" beats before the first sentence
+  for (const beat of actionBeats) {
+    if (!beat.fired && beat.fraction === 0) {
+      beat.fired = true
+      out.push(`At ${beat.timestamp} — ${beat.text}.`)
+    }
   }
 
   sentences.forEach((raw, i) => {
@@ -1675,7 +1772,8 @@ function annotateDialogue(rawText, productTag, durationSecs, isHandheld = false)
     if (hasPivot && hasEllipsis) {
       const [before, after] = s.split(/\.\.\./)
       const eyeExpr = useMicro(' eyes widen slightly.')
-      if (prod) out.push(`She tilts ${prod} toward camera.`)
+      wornGestureCounter++ // keep counter in sync — this path has its own product beat
+      if (prod) out.push(wearMode ? `She touches ${prod} and angles so it's clearly visible to camera.` : `She tilts ${prod} toward camera.`)
       else out.push(`She leans in slightly.`)
       out.push(`"${before.trim()}..."`)
       out.push(`[micro-pause${eyeExpr ? ` —${eyeExpr}` : '.'}]`)
@@ -1693,7 +1791,8 @@ function annotateDialogue(rawText, productTag, durationSecs, isHandheld = false)
 
     // Pure pivot ("but...", "however...", "actually...") without ellipsis
     if (hasPivot || (hasActually && !isNegative)) {
-      if (prod) out.push(`She tilts ${prod} toward camera. "${s}" [beat.]`)
+      wornGestureCounter++ // keep counter in sync
+      if (prod) out.push(wearMode ? `She touches ${prod}, angles so it's visible. "${s}" [beat.]` : `She tilts ${prod} toward camera. "${s}" [beat.]`)
       else out.push(`She leans forward slightly. "${s}" [beat.]`)
       return
     }
@@ -1701,6 +1800,8 @@ function annotateDialogue(rawText, productTag, durationSecs, isHandheld = false)
     // Mid-sentence ellipsis without pivot: "this thing is... incredible"
     if (hasEllipsis) {
       const [before, after] = s.split(/\.\.\./)
+      const g = maybeWornGesture()
+      if (g) out.push(g)
       out.push(`"${before.trim()}..."`)
       out.push(`[micro-pause.]`)
       const afterTrimmed = after?.trim()
@@ -1718,6 +1819,8 @@ function annotateDialogue(rawText, productTag, durationSecs, isHandheld = false)
     // Negative / dismissal line — slight honest reaction
     if (isNegative) {
       const m = useMicro(' Slight face — honest, not dramatic.')
+      const g = maybeWornGesture()
+      if (g) out.push(g)
       out.push(`"${s}"${m} [beat.]`)
       return
     }
@@ -1725,66 +1828,39 @@ function annotateDialogue(rawText, productTag, durationSecs, isHandheld = false)
     // Exclamation — genuine reaction, not performed
     if (endsExclaim) {
       const m = useMicro('[holds the moment — genuine reaction, not performed.] ')
+      const g = maybeWornGesture()
+      if (g) out.push(g)
       out.push(`She says under her breath, "${s}" ${m}Light exhale.`)
       return
     }
 
     // Default — statement with conversational beat
+    const g = maybeWornGesture()
+    if (g) out.push(g)
     out.push(`"${s}" [beat.]`)
+
+    // Inject any action beats that fall at or before this sentence's position
+    if (actionBeats.length) {
+      const sentenceFraction = (i + 1) / sentences.length
+      for (const beat of actionBeats) {
+        if (!beat.fired && beat.fraction <= sentenceFraction) {
+          beat.fired = true
+          out.push(`At ${beat.timestamp} — ${beat.text}.`)
+        }
+      }
+    }
   })
+
+  // Fire any remaining beats (e.g. atEnd beats or no-dialogue case)
+  for (const beat of actionBeats) {
+    if (!beat.fired) {
+      beat.fired = true
+      out.push(`At ${beat.timestamp} — ${beat.text}.`)
+    }
+  }
 
   return out.join(' ')
 }
-
-// ─────────────────────────────────────────────
-// Video generation loading messages
-const VIDEO_LOADING_MESSAGES = [
-  // performance / acting
-  'she\'s about to deliver. the AI is not rushing a performance like this.',
-  'teaching her exactly where to look. the answer is: directly into your soul.',
-  'calibrating the pause before the line. that pause is everything.',
-  'the micro-expression is rendering. it is very micro. give it a moment.',
-  'adding the breath before she speaks. realism lives in that breath.',
-  'she knows her lines. the GPU is making sure she means them.',
-  // wait / process
-  'Seedance is thinking. Seedance thinks at a cinematic pace.',
-  'this takes {est}. good content always does.',
-  'the render queue is long because everyone wants what you have.',
-  'your video is cooking. do not open the oven.',
-  'reference images uploaded. Seedance is studying them like it has an exam.',
-  'still here. the frames are coming. all {est} worth of them.',
-  'the render is progressing. the render does not take requests.',
-  'hang on. the GPU is doing something unreasonable and we respect it.',
-  'still generating. she\'s worth the {est}.',
-  // authenticity
-  'adding the imperfection that makes it feel real. on purpose.',
-  'making sure the handheld shake reads as human, not broken.',
-  'adding the blink at exactly the right moment. timing is everything.',
-  'rendering the part where she almost smiles before the line. that\'s the shot.',
-  'she\'s walking and talking. the GPU is handling both simultaneously.',
-  // product
-  'making sure she holds the product like she found it, not like she was paid to.',
-  'calibrating how naturally she looks at the camera after saying "honest review".',
-  'the UGC energy is loading. it takes {est} to look this unproduced.',
-  'the product is in frame. it will stay in frame. we are watching it.',
-  // creator economy
-  'rendering content that will earn while you sleep.',
-  'your AI influencer is about to become your hardest-working employee.',
-  'she doesn\'t get tired. she doesn\'t need a callback. she just delivers.',
-  'the content is generating. the algorithm is already interested.',
-  // technical / seedance
-  'Seedance is frame-by-frame making sure she never freezes. not once.',
-  'zero cuts confirmed. the model read the brief.',
-  'the continuous take is continuous. we checked.',
-  'the face lock is holding. bone structure: fixed. jawline: locked. eyes: on lens.',
-  'she\'s been walking for {est} of render time and hasn\'t stopped once.',
-  // wait humor
-  'nearly done. not done. nearly.',
-  'almost there. well. almost almost there.',
-  'still rendering. this is what {est} of commitment feels like.',
-  'we could speed this up. we are choosing not to.',
-  'the video is loading. the video is worth the wait.',
-]
 
 const SEEDANCE_TIPS = [
   { label: 'Pro tip', text: 'Always end with "No music. No captions." — Seedance adds royalty-free music by default and it kills the vibe.' },
@@ -1816,25 +1892,27 @@ function ContentStudio({ influencer, onUpdate }) {
 
   const [productRef1, setProductRef1] = useState(null)
   const [productRef2, setProductRef2] = useState(null)
+  const [productWorn, setProductWorn] = useState(() => localStorage.getItem('hf_product_worn') === '1')
   const [dragOver1, setDragOver1] = useState(false)
   const [dragOver2, setDragOver2] = useState(false)
   const productFileRef1 = useRef()
   const productFileRef2 = useRef()
-  const [dialogue, setDialogue] = useState('')
+  const [dialogue, setDialogue] = useState(() => localStorage.getItem('hf_dialogue') || '')
   const [environment, setEnvironment] = useState('')
   const [envKey, setEnvKey] = useState('')
-  const [camera, setCamera] = useState('Handheld')
-  const [vibe, setVibe] = useState('')
-  const [voicePreset, setVoicePreset] = useState('')
-  const [voiceCustom, setVoiceCustom] = useState('')
+  const [camera, setCamera] = useState(() => localStorage.getItem('hf_camera') || 'Handheld')
+  const [vibe, setVibe] = useState(() => localStorage.getItem('hf_vibe') || '')
+  const [voicePreset, setVoicePreset] = useState(() => localStorage.getItem('hf_voice_preset') || '')
+  const [voiceCustom, setVoiceCustom] = useState(() => localStorage.getItem('hf_voice_custom') || '')
   const [additionalNotes, setAdditionalNotes] = useState('')
   const [audioDataUrl, setAudioDataUrl] = useState(null)
   const [audioFileName, setAudioFileName] = useState('')
   const audioFileRef = useRef()
-  const [duration, setDuration] = useState(15)
-  const [aspect, setAspect] = useState('9:16')
-  const [outputs, setOutputs] = useState(1)
-  const [shotMode, setShotMode] = useState('oner')
+  const [duration, setDuration] = useState(() => Number(localStorage.getItem('hf_duration')) || 15)
+  const [aspect, setAspect] = useState(() => localStorage.getItem('hf_aspect') || '9:16')
+  const [outputs, setOutputs] = useState(() => Number(localStorage.getItem('hf_outputs')) || 1)
+  const [resolution, setResolution] = useState(() => localStorage.getItem('hf_resolution') || '1080p')
+  const [shotMode, setShotMode] = useState(() => localStorage.getItem('hf_shot_mode') || 'oner')
   const [saved, setSaved] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [genProgress, setGenProgress] = useState(0)
@@ -1843,10 +1921,9 @@ function ContentStudio({ influencer, onUpdate }) {
   const [elapsed, setElapsed] = useState(0)
   const elapsedRef = useRef(null)
   const [showPrompt, setShowPrompt] = useState(false)
+  const [lastGeneratedPrompt, setLastGeneratedPrompt] = useState(null)
+  const [promptRecomputeTick, setPromptRecomputeTick] = useState(0)
   const [copied, setCopied] = useState(false)
-  const [msgIdx, setMsgIdx] = useState(() => Math.floor(Math.random() * VIDEO_LOADING_MESSAGES.length))
-  const [msgVisible, setMsgVisible] = useState(true)
-  const msgQueue = useRef([])
   const [tipIdx, setTipIdx] = useState(() => Math.floor(Math.random() * SEEDANCE_TIPS.length))
   const [tipVisible, setTipVisible] = useState(true)
   const tipQueue = useRef([])
@@ -1860,29 +1937,10 @@ function ContentStudio({ influencer, onUpdate }) {
     try { return JSON.parse(localStorage.getItem('hf_video_history') || '[]') } catch { return [] }
   })
   const [showHistory, setShowHistory] = useState(false)
-  const [advanced, setAdvanced] = useState(false)
-  const [videoModel, setVideoModel] = useState('seedance_2_0')
-  const [showSeedanceReminder, setShowSeedanceReminder] = useState(false)
-
-  // Cycle loading messages while generating
-  useEffect(() => {
-    if (!generating) return
-    const id = setInterval(() => {
-      setMsgVisible(false)
-      setTimeout(() => {
-        setMsgIdx(cur => {
-          if (msgQueue.current.length === 0) {
-            const all = VIDEO_LOADING_MESSAGES.map((_,i)=>i).filter(i=>i!==cur)
-            for (let i=all.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[all[i],all[j]]=[all[j],all[i]]}
-            msgQueue.current = all
-          }
-          return msgQueue.current.shift()
-        })
-        setMsgVisible(true)
-      }, 300)
-    }, 6500)
-    return () => clearInterval(id)
-  }, [generating])
+  const [advanced, setAdvanced] = useState(() => {
+    try { return localStorage.getItem('cs_advanced_open') === '1' } catch { return false }
+  })
+  const videoModel = 'seedance_2_0'
 
   // Tip cycling — every 12s
   useEffect(() => {
@@ -1966,17 +2024,18 @@ function ContentStudio({ influencer, onUpdate }) {
 
     // Camera style → STYLE field
     const styleMap = {
-      'Handheld': 'Self-filmed handheld. @image_1 holds the camera at arm\'s length, 24mm, walk-pace bob and drift throughout. Never fully static. NO shallow DOF, NO bokeh, NO blur, natural front-cam color.',
-      'Tripod':   'Locked tripod, 28mm. Static frame, nothing moves except the subject. Everything in focus front to back. NO shallow DOF, NO bokeh, NO blur, clean natural color.',
-      'Wide':     '28mm, locked wide shot, full body visible in environment, natural light, everything in focus front to back. NO shallow DOF, NO bokeh, NO blur.',
-      'Overhead': 'Overhead bird\'s-eye camera, locked, looking straight down at the subject. 35mm equivalent, everything in focus, clean and graphic. NO shallow DOF, NO bokeh, NO blur.',
+      'Handheld':     'Self-filmed handheld. @image_1 holds the camera at arm\'s length, 24mm, walk-pace bob and drift throughout. Never fully static. NO shallow DOF, NO bokeh, NO blur, natural front-cam color.',
+      'Tripod':       'Locked tripod, 28mm. Static frame, nothing moves except the subject. Everything in focus front to back. NO shallow DOF, NO bokeh, NO blur, clean natural color.',
+      'Talking Head': 'Locked tripod, 50mm portrait lens. Medium shot — framed from mid-chest up. Subject is seated, hands visible resting on desk surface in foreground. Static frame, nothing moves except the subject. Even studio lighting, soft and controlled. Everything in focus. NO shallow DOF, NO bokeh, NO blur, clean neutral color.',
+      'Wide':         '28mm, locked wide shot, full body visible in environment, natural light, everything in focus front to back. NO shallow DOF, NO bokeh, NO blur.',
+      'Overhead':     'Overhead bird\'s-eye camera, locked, looking straight down at the subject. 35mm equivalent, everything in focus, clean and graphic. NO shallow DOF, NO bokeh, NO blur.',
     }
-    const cameraMovement = { 'Handheld':'handheld moving','Tripod':'locked','Wide':'locked','Overhead':'locked' }
+    const cameraMovement = { 'Handheld':'handheld moving','Tripod':'locked','Talking Head':'locked','Wide':'locked','Overhead':'locked' }
     const stylePreset = styleMap[camera] || styleMap['Handheld']
     const move = cameraMovement[camera] || 'locked'
 
     // Environment — free text from user input (may be a custom description or a preset)
-    const envDesc = environment || 'Clean modern interior, natural window light ~5500K.'
+    const envDesc = environment || (isTalkingHead ? 'Clean minimal studio setup. Desk surface visible in foreground, soft neutral background. Soft box lighting ~5600K, even and controlled.' : 'Clean modern interior, natural window light ~5500K.')
 
     // Mood arc
     const moodMap = {
@@ -2008,13 +2067,19 @@ function ContentStudio({ influencer, onUpdate }) {
     const fullDialogue = dialogue.trim()
     const prod1Tag = tagMap.product1 || null
     const isHandheld = camera === 'Handheld'
-    const annotatedDialogue = annotateDialogue(fullDialogue, prod1Tag, duration, isHandheld)
+    const isTalkingHead = camera === 'Talking Head'
+    const wearMode = !!(productRef1 && productWorn)
+
+    // Parse notes first so action beats can be woven into annotateDialogue
+    const { actionBeats, directionNotes } = parseAdditionalNotes(additionalNotes, duration)
+
+    const annotatedDialogue = annotateDialogue(fullDialogue, prod1Tag, duration, isHandheld, wearMode, actionBeats)
     // For multi-shot: distribute raw sentences across shots
     const dialogueLines = fullDialogue ? fullDialogue.split(/(?<=[.!?])\s+/).filter(s=>s.trim()) : []
 
     // Product logic rules (use actual computed tag indices)
     const productRules = []
-    if (tagMap.product1) productRules.push(`${tagMap.product1} is the product — same object every frame, same color, label position, and size. Never substituted. ${tagMap.product1} contributes ONLY the product — never the face, identity, or wardrobe.`)
+    if (tagMap.product1) productRules.push(`${tagMap.product1} is the product — same object every frame, same color, label position, and size. Never substituted. ${tagMap.product1} contributes ONLY the product — never the face, identity, or wardrobe.${wearMode ? ` ${tagMap.product1} is WORN — never held. She naturally interacts with it once or twice — a brief touch or glance — without overdoing it.` : ''}`)
     if (tagMap.product2) productRules.push(`${tagMap.product2} is the second product — same consistency rules apply.`)
 
     // Build shots
@@ -2023,8 +2088,8 @@ function ContentStudio({ influencer, onUpdate }) {
       : shotCount === 3 ? [2, Math.round((duration-2)/2), duration - 2 - Math.round((duration-2)/2)]
       : [2, 3, Math.floor((duration-5)/2), Math.ceil((duration-5)/2)]
 
-    const framing = camera === 'Wide' ? 'WS' : camera === 'Overhead' ? 'overhead' : 'MCU'
-    const lens = camera === 'Handheld' ? '24mm' : camera === 'Wide' ? '28mm' : camera === 'Overhead' ? '35mm' : '28mm'
+    const framing = camera === 'Wide' ? 'WS' : camera === 'Overhead' ? 'overhead' : camera === 'Talking Head' ? 'MS' : 'MCU'
+    const lens = camera === 'Handheld' ? '24mm' : camera === 'Wide' ? '28mm' : camera === 'Overhead' ? '35mm' : camera === 'Talking Head' ? '50mm' : '28mm'
 
     const shots = []
     let t = 0
@@ -2037,11 +2102,13 @@ function ContentStudio({ influencer, onUpdate }) {
         const action = annotatedDialogue || `@image_1 faces camera. Eyes on lens at 0:00.`
         shots.push(`ACTION:\n0:00 to 0:${String(duration).padStart(2,'0')} — ${framing}, ${lens}, ${move}. One continuous take.\n\n${action} Natural conversational gestures as she speaks.`)
       } else if (i === 0) {
-        const hookLine = dialogueLines[0] ? annotateDialogue(dialogueLines[0], prod1Tag, duration, isHandheld) : `@image_1 faces camera. Eyes on lens at 0:00.`
+        const hookLine = dialogueLines[0] ? annotateDialogue(dialogueLines[0], prod1Tag, duration, isHandheld, wearMode) : `@image_1 faces camera. Eyes on lens at 0:00.`
         shots.push(`SHOT 1 — ${ts}, ${framing}, ${lens}, ${move}.\n${hookLine}`)
       } else {
         const line = dialogueLines[i] || ''
-        const gesture = prod1Tag && i === 1 ? `she tilts ${prod1Tag} toward camera slightly` : 'one hand lifts — palm-up, natural half-shrug'
+        const gesture = prod1Tag && i === 1
+          ? (wearMode ? `she touches ${prod1Tag} and angles toward camera to show it` : `she tilts ${prod1Tag} toward camera slightly`)
+          : 'one hand lifts — palm-up, natural half-shrug'
         const lineStr = line ? `"${line.trim()}" [beat — eyes stay on camera.] ` : '[holds the moment.] '
         shots.push(`SHOT ${i+1} — ${ts}, ${framing}, ${lens}, ${move}.\n@image_1 continues. ${gesture}. ${lineStr}Voice unhurried. Tone genuine.`)
       }
@@ -2067,9 +2134,18 @@ function ContentStudio({ influencer, onUpdate }) {
       ? `Voice: ${allPresets.find(v => v.id === voicePreset)?.voice || ''}`
       : fullDialogue ? 'Natural voice, genuine and present.' : 'No dialogue.'
 
-    const notesSection = additionalNotes.trim()
-      ? `\nADDITIONAL REQUIREMENTS: ${additionalNotes.trim()}`
-      : ''
+    // For multi-shot: append any unfired beats to the shot whose time window contains the beat
+    const shotsWithBeats = shotMode === 'oner' ? shots : shots.map((shot, i) => {
+      const shotStart = shotDurs.slice(0, i).reduce((a, b) => a + b, 0)
+      const shotEnd = shotStart + shotDurs[i]
+      const beatsForShot = actionBeats.filter(b => {
+        const sec = b.fraction * duration
+        return sec >= shotStart && sec < shotEnd && !b.fired
+      })
+      beatsForShot.forEach(b => { b.fired = true })
+      if (!beatsForShot.length) return shot
+      return shot + '\n' + beatsForShot.map(b => `At ${b.timestamp} — ${b.text}.`).join(' ')
+    })
 
     return `FORMAT: ${duration}s / ${shotCount === 1 ? '1 SHOT — continuous oner, ZERO CUTS' : `${shotCount} SHOTS`} / direct address
 
@@ -2086,12 +2162,12 @@ COLOR LOGIC: ${colorLogic}
 STYLE: ${stylePreset}
 
 DELIVERY: ${deliveryLine}
-
-LOGIC RULE: @image_1 face is fixed — same bone structure, eye color, skin tone, jawline, zero drift. Only one @image_1 in frame at any time.${shotMode==='oner' ? ' ZERO CUTS — single uninterrupted take 0:00 to ' + duration + 's. No jump cuts, no zoom, no camera switch, no temporal skip. @image_1 moves continuously — never freezes.' : ' Wardrobe identical across all shots.'} No phone or smartphone visible in frame at any time — no device in hand, on any surface, or in the background. No music. No captions. No text overlays.${productRules.length ? ' ' + productRules.join(' ') : ''}${notesSection}
+${directionNotes ? `\nDIRECTION: ${directionNotes}` : ''}
+LOGIC RULE: @image_1 face is fixed — same bone structure, eye color, skin tone, jawline, zero drift. Only one @image_1 in frame at any time.${shotMode==='oner' ? ' ZERO CUTS — single uninterrupted take 0:00 to ' + duration + 's. No jump cuts, no zoom, no camera switch, no temporal skip. @image_1 moves continuously — never freezes.' : ' Wardrobe identical across all shots.'} No phone or smartphone visible in frame at any time — no device in hand, on any surface, or in the background. No music. No captions. No text overlays.${productRules.length ? ' ' + productRules.join(' ') : ''}
 
 ---
 
-${shots.join('\n\n')}`
+${shotsWithBeats.join('\n\n')}`
   }
 
   function saveScript(videoUrl = '') {
@@ -2124,7 +2200,8 @@ ${shots.join('\n\n')}`
   }
 
   function saveToHistory() {
-    const entry = { dialogue, environment, envKey, camera, vibe, voicePreset, voiceCustom, additionalNotes, duration, aspect, outputs, shotMode, productRef1, productRef2, ts: Date.now() }
+    const builtPrompt = buildPrompt()
+    const entry = { dialogue, environment, envKey, camera, vibe, voicePreset, voiceCustom, additionalNotes, duration, aspect, outputs, shotMode, productRef1, productRef2, productWorn, prompt: builtPrompt, ts: Date.now() }
     const prev = JSON.parse(localStorage.getItem('hf_video_history') || '[]')
     const next = [entry, ...prev.filter(e => e.ts !== entry.ts)].slice(0, 5)
     localStorage.setItem('hf_video_history', JSON.stringify(next))
@@ -2146,8 +2223,21 @@ ${shots.join('\n\n')}`
     setShotMode(entry.shotMode || 'oner')
     if (entry.productRef1) setProductRef1(entry.productRef1)
     if (entry.productRef2) setProductRef2(entry.productRef2)
+    setProductWorn(!!entry.productWorn)
+    if (entry.prompt) {
+      setLastGeneratedPrompt(entry.prompt)
+    } else {
+      // No saved prompt — recompute after restored state settles
+      setPromptRecomputeTick(t => t + 1)
+    }
     setShowHistory(false)
   }
+
+  // Runs after state from restoreHistory has settled — buildPrompt() sees the correct values
+  useEffect(() => {
+    if (promptRecomputeTick === 0) return
+    setLastGeneratedPrompt(buildPrompt())
+  }, [promptRecomputeTick]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function applyTemplate(t) {
     setDialogue(t.dialogue)
@@ -2174,6 +2264,7 @@ ${shots.join('\n\n')}`
     setGenProgress(0)
     setElapsed(0)
     saveToHistory()
+    setLastGeneratedPrompt(buildPrompt())
     const start = Date.now()
     elapsedRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000)
     try {
@@ -2185,6 +2276,7 @@ ${shots.join('\n\n')}`
         referenceImages: buildRefs(),
         audioRef: audioDataUrl || null,
         model: videoModel,
+        resolution,
         onProgress: setGenProgress,
         onPartialResults: partials => { if (!cancelRef.current) setGenResults([...partials]) },
         isCancelled: () => cancelRef.current,
@@ -2209,6 +2301,7 @@ ${shots.join('\n\n')}`
         referenceImages: buildRefs(),
         audioRef: audioDataUrl || null,
         model: videoModel,
+        resolution,
         onProgress: () => {},
         isCancelled: () => false,
       })
@@ -2296,7 +2389,7 @@ ${shots.join('\n\n')}`
         <CSStepHeader n={1} title="Script" sub={`What should ${influencer.name} say?`}/>
         <textarea
           value={dialogue}
-          onChange={e=>setDialogue(e.target.value)}
+          onChange={e=>{setDialogue(e.target.value);localStorage.setItem('hf_dialogue',e.target.value)}}
           placeholder={`Write what ${influencer.name} should say...`}
           rows={4}
           style={{
@@ -2329,15 +2422,32 @@ ${shots.join('\n\n')}`
       <Sec>
         <CSStepHeader n={2} title="Products" sub="Drag in up to 2 product images (optional)"/>
         <div style={{display:'flex',gap:10}}>
-          <CSProductSlot value={productRef1} onChange={setProductRef1} dragOver={dragOver1} setDragOver={setDragOver1} fileRef={productFileRef1} label="Product 1"/>
+          <CSProductSlot value={productRef1} onChange={v=>{setProductRef1(v);if(!v){setProductWorn(false);localStorage.setItem('hf_product_worn','0')}}} dragOver={dragOver1} setDragOver={setDragOver1} fileRef={productFileRef1} label="Product 1"/>
           <CSProductSlot value={productRef2} onChange={setProductRef2} dragOver={dragOver2} setDragOver={setDragOver2} fileRef={productFileRef2} label="Product 2"/>
           <div style={{flex:1}}/>
         </div>
+        {productRef1 && (
+          <div style={{marginTop:12,display:'flex',alignItems:'center',gap:8}}>
+            <span style={{fontSize:11,fontWeight:600,color:'var(--text-tertiary)'}}>Product interaction</span>
+            {['Held','Worn'].map(opt => {
+              const active = opt === 'Worn' ? productWorn : !productWorn
+              return (
+                <button key={opt} onClick={()=>{const w=opt==='Worn';setProductWorn(w);localStorage.setItem('hf_product_worn',w?'1':'0')}} style={{
+                  padding:'5px 13px',borderRadius:8,fontSize:11,fontWeight:600,cursor:'pointer',
+                  background: active ? 'linear-gradient(135deg,rgba(236,72,153,0.15),rgba(139,92,246,0.15))' : 'var(--bg-tertiary)',
+                  color: active ? '#8B5CF6' : 'var(--text-secondary)',
+                  border: active ? '1.5px solid rgba(139,92,246,0.4)' : '1.5px solid transparent',
+                  transition:'all 0.15s',
+                }}>{opt}</button>
+              )
+            })}
+          </div>
+        )}
       </Sec>
 
       {/* Advanced Settings toggle */}
       <button
-        onClick={() => setAdvanced(v => !v)}
+        onClick={() => setAdvanced(v => { const next = !v; try { localStorage.setItem('cs_advanced_open', next ? '1' : '0') } catch {} return next })}
         style={{
           display:'flex',alignItems:'center',justifyContent:'center',gap:8,
           padding:'10px',borderRadius:10,fontSize:12,fontWeight:600,
@@ -2368,7 +2478,7 @@ ${shots.join('\n\n')}`
           <textarea
             value={environment}
             onChange={e => { setEnvironment(e.target.value); setEnvKey('') }}
-            placeholder="Or describe it — e.g. Rooftop at golden hour, city skyline in background, warm side light."
+            placeholder="e.g. Dubai Mall with shoppers in the background, luxury retail lighting. Or: Rooftop at golden hour, city skyline behind her."
             rows={2}
             style={{
               width:'100%',padding:'10px 12px',borderRadius:10,marginTop:10,
@@ -2387,7 +2497,7 @@ ${shots.join('\n\n')}`
               const meta = CAMERA_META[c] || { label: c, desc: '' }
               const on = camera === c
               return (
-                <button key={c} onClick={() => setCamera(c)} style={{
+                <button key={c} onClick={() => {setCamera(c);localStorage.setItem('hf_camera',c)}} style={{
                   padding:'7px 14px',borderRadius:980,fontSize:12,fontWeight:600,
                   background: on ? 'linear-gradient(135deg,rgba(236,72,153,0.15),rgba(139,92,246,0.15))' : 'var(--bg-tertiary)',
                   color: on ? '#8B5CF6' : 'var(--text-secondary)',
@@ -2402,7 +2512,7 @@ ${shots.join('\n\n')}`
         {/* Vibe */}
         <Sec>
           <CSStepHeader n={5} title="Vibe" sub="What's the overall mood and energy?"/>
-          <CSChips options={CS_VIBES} value={vibe} onChange={setVibe}/>
+          <CSChips options={CS_VIBES} value={vibe} onChange={v=>{setVibe(v);localStorage.setItem('hf_vibe',v)}}/>
           {vibe && VIBE_META[vibe] && (
             <div style={{
               marginTop:10,padding:'8px 12px',borderRadius:9,
@@ -2483,7 +2593,7 @@ ${shots.join('\n\n')}`
                   </div>
                   <select
                     value={voicePreset}
-                    onChange={e => { setVoicePreset(e.target.value); setVoiceCustom('') }}
+                    onChange={e => { setVoicePreset(e.target.value); setVoiceCustom(''); localStorage.setItem('hf_voice_preset',e.target.value); localStorage.setItem('hf_voice_custom','') }}
                     style={{
                       width:'100%',padding:'9px 12px',borderRadius:10,boxSizing:'border-box',
                       border:'1.5px solid var(--border)',background:'var(--bg)',
@@ -2503,7 +2613,7 @@ ${shots.join('\n\n')}`
                   </div>
                   <input
                     value={voiceCustom}
-                    onChange={e => { setVoiceCustom(e.target.value); setVoicePreset('') }}
+                    onChange={e => { setVoiceCustom(e.target.value); setVoicePreset(''); localStorage.setItem('hf_voice_custom',e.target.value); localStorage.setItem('hf_voice_preset','') }}
                     placeholder="e.g. Young American woman, energetic and lively"
                     style={{
                       width:'100%',padding:'9px 12px',borderRadius:10,boxSizing:'border-box',
@@ -2527,7 +2637,7 @@ ${shots.join('\n\n')}`
             ].map(m=>{
               const on = shotMode===m.id
               return (
-                <button key={m.id} onClick={()=>setShotMode(m.id)} style={{
+                <button key={m.id} onClick={()=>{setShotMode(m.id);localStorage.setItem('hf_shot_mode',m.id)}} style={{
                   padding:'12px 14px',borderRadius:12,textAlign:'left',
                   background: on ? 'linear-gradient(135deg,rgba(236,72,153,0.12),rgba(139,92,246,0.12))' : 'var(--bg-tertiary)',
                   border: on ? '1.5px solid rgba(139,92,246,0.45)' : '1.5px solid transparent',
@@ -2555,8 +2665,8 @@ ${shots.join('\n\n')}`
           <textarea
             value={additionalNotes}
             onChange={e => setAdditionalNotes(e.target.value)}
-            placeholder={`e.g. "The logo on the product must always be fully visible and facing camera — never obscured or turned away."`}
-            rows={3}
+            placeholder={`Actions go directly into the prompt — be specific.\n\ne.g. "She holds up the bracelet close to the camera at the start."\ne.g. "She laughs and looks away at 5s."\ne.g. "She pauses and smiles at the end."\n\nTip: add timing — "at the start", "at 4s", or "at the end" — otherwise it lands in the middle.`}
+            rows={6}
             style={{
               width:'100%',padding:'11px 13px',borderRadius:10,boxSizing:'border-box',
               border:'1.5px solid var(--border)',background:'var(--bg)',
@@ -2570,66 +2680,6 @@ ${shots.join('\n\n')}`
         <Sec>
           <CSStepHeader n={9} title="Settings"/>
 
-          {/* Model selector */}
-          <div style={{marginBottom:18}}>
-            <div style={{fontSize:11,fontWeight:600,color:'var(--text-tertiary)',marginBottom:8}}>Model</div>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
-              {[
-                {
-                  id: 'seedance_2_0', label: 'Seedance 2.0', sub: 'Best quality · Recommended',
-                },
-                {
-                  id: 'kling3_0', label: 'Kling 3.0', sub: 'Quick generations',
-                },
-              ].map(m => {
-                const on = videoModel === m.id
-                return (
-                  <button key={m.id} onClick={() => {
-                    setVideoModel(m.id)
-                    if (m.id === 'seedance_2_0' && !localStorage.getItem('hf_seedance_warn_seen')) {
-                      setShowSeedanceReminder(true)
-                    }
-                    if (m.id === 'kling3_0') setShowSeedanceReminder(false)
-                  }} style={{
-                    padding:'11px 13px',borderRadius:11,textAlign:'left',cursor:'pointer',
-                    background: on ? 'rgba(0,196,130,0.08)' : 'var(--bg-tertiary)',
-                    border: on ? '1.5px solid rgba(0,196,130,0.4)' : '1.5px solid transparent',
-                    transition:'all 0.15s',
-                  }}>
-                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
-                      <img src="/hf-icon.png" alt="" style={{
-                        width:18,height:18,borderRadius:5,display:'block',flexShrink:0,
-                        opacity: on ? 1 : 0.45,
-                      }}/>
-                      <span style={{fontSize:12,fontWeight:700,color: on ? '#00C482' : 'var(--text-secondary)'}}>{m.label}</span>
-                    </div>
-                    <div style={{fontSize:10,color:'var(--text-tertiary)',lineHeight:1.4}}>{m.sub}</div>
-                  </button>
-                )
-              })}
-            </div>
-            {/* One-time Seedance render-time reminder */}
-            {showSeedanceReminder && (
-              <div style={{
-                marginTop:10,padding:'10px 13px',borderRadius:10,
-                background:'rgba(0,196,130,0.07)',border:'1px solid rgba(0,196,130,0.25)',
-                display:'flex',alignItems:'flex-start',gap:10,
-              }}>
-                <span style={{fontSize:15,flexShrink:0,marginTop:1}}>⏱</span>
-                <div style={{flex:1,fontSize:12,color:'var(--text-secondary)',lineHeight:1.55}}>
-                  Seedance 2.0 renders take <strong style={{color:'var(--text-primary)'}}>6–10 minutes</strong> — best quality output, worth the wait.
-                </div>
-                <button onClick={() => {
-                  setShowSeedanceReminder(false)
-                  localStorage.setItem('hf_seedance_warn_seen', '1')
-                }} style={{
-                  flexShrink:0,fontSize:16,color:'var(--text-tertiary)',lineHeight:1,
-                  background:'none',border:'none',cursor:'pointer',padding:'0 2px',
-                }}>×</button>
-              </div>
-            )}
-          </div>
-
           <div style={{display:'flex',gap:20,flexWrap:'wrap',alignItems:'flex-start'}}>
 
             <div style={{flex:'1 1 160px',minWidth:140}}>
@@ -2637,7 +2687,7 @@ ${shots.join('\n\n')}`
                 <div style={{fontSize:11,fontWeight:600,color:'var(--text-tertiary)'}}>Duration</div>
                 <div style={{fontSize:16,fontWeight:700,color:'var(--text-primary)',fontVariantNumeric:'tabular-nums'}}>{duration}s</div>
               </div>
-              <input type="range" min={4} max={15} step={1} value={duration} onChange={e=>setDuration(Number(e.target.value))}
+              <input type="range" min={4} max={15} step={1} value={duration} onChange={e=>{const v=Number(e.target.value);setDuration(v);localStorage.setItem('hf_duration',v)}}
                 style={{width:'100%',accentColor:'#8B5CF6',cursor:'pointer',height:4}}/>
               <div style={{display:'flex',justifyContent:'space-between',marginTop:4}}>
                 <span style={{fontSize:10,color:'var(--text-tertiary)'}}>4s</span>
@@ -2649,10 +2699,10 @@ ${shots.join('\n\n')}`
               <div style={{fontSize:11,fontWeight:600,color:'var(--text-tertiary)',marginBottom:8}}>Format</div>
               <div style={{display:'flex',gap:6}}>
                 {[
-                  {r:'9:16', label:'📱 Reels / TikTok'},
-                  {r:'16:9', label:'🖥 YouTube / Wide'},
-                ].map(({r, label})=>(
-                  <button key={r} onClick={()=>setAspect(r)} style={{
+                  {r:'9:16',  label:'📱 Reels'},
+                  {r:'16:9',  label:'🖥 Long-form'},
+                ].map(({r, label}) => (
+                  <button key={r} onClick={()=>{setAspect(r);localStorage.setItem('hf_aspect',r)}} style={{
                     padding:'7px 12px',borderRadius:9,fontSize:11,fontWeight:600,
                     background: aspect===r ? 'linear-gradient(135deg,rgba(236,72,153,0.15),rgba(139,92,246,0.15))' : 'var(--bg-tertiary)',
                     color: aspect===r ? '#8B5CF6' : 'var(--text-secondary)',
@@ -2664,10 +2714,25 @@ ${shots.join('\n\n')}`
             </div>
 
             <div>
+              <div style={{fontSize:11,fontWeight:600,color:'var(--text-tertiary)',marginBottom:8}}>Resolution</div>
+              <div style={{display:'flex',gap:6}}>
+                {['480p','720p','1080p'].map(r => (
+                  <button key={r} onClick={()=>{setResolution(r);localStorage.setItem('hf_resolution',r)}} style={{
+                    padding:'7px 12px',borderRadius:9,fontSize:11,fontWeight:600,
+                    background: resolution===r ? 'linear-gradient(135deg,rgba(236,72,153,0.15),rgba(139,92,246,0.15))' : 'var(--bg-tertiary)',
+                    color: resolution===r ? '#8B5CF6' : 'var(--text-secondary)',
+                    border: resolution===r ? '1.5px solid rgba(139,92,246,0.4)' : '1.5px solid transparent',
+                    transition:'all 0.15s',whiteSpace:'nowrap',
+                  }}>{r}</button>
+                ))}
+              </div>
+            </div>
+
+            <div>
               <div style={{fontSize:11,fontWeight:600,color:'var(--text-tertiary)',marginBottom:8}}>Outputs</div>
               <div style={{display:'flex',gap:6}}>
                 {[1,2,3].map(n=>(
-                  <button key={n} onClick={()=>setOutputs(n)} style={{
+                  <button key={n} onClick={()=>{setOutputs(n);localStorage.setItem('hf_outputs',n)}} style={{
                     width:40,height:40,borderRadius:9,fontSize:14,fontWeight:700,
                     background: outputs===n ? 'linear-gradient(135deg,rgba(236,72,153,0.15),rgba(139,92,246,0.15))' : 'var(--bg-tertiary)',
                     color: outputs===n ? '#8B5CF6' : 'var(--text-secondary)',
@@ -2717,7 +2782,7 @@ ${shots.join('\n\n')}`
                     <span style={{fontSize:12,fontWeight:600,color:'var(--text-secondary)'}}>
                       {genProgress < 10 ? 'Connecting...'
                         : genProgress < 28 ? 'Uploading references...'
-                        : genProgress < 33 ? 'Submitting to Seedance...'
+                        : genProgress < 35 ? 'Submitting to Seedance...'
                         : genProgress >= 95 ? 'Almost there...'
                         : outputs > 1 && genResults.length > 0
                           ? `Rendering · ${genResults.length}/${outputs} ready`
@@ -2747,15 +2812,6 @@ ${shots.join('\n\n')}`
                   }}/>
                 </div>
 
-                {/* Cycling fun message */}
-                <div style={{textAlign:'center',minHeight:17}}>
-                  <span style={{
-                    fontSize:12,color:'var(--text-tertiary)',fontStyle:'italic',
-                    opacity: msgVisible ? 1 : 0,transition:'opacity 0.3s ease',
-                  }}>
-                    {VIDEO_LOADING_MESSAGES[msgIdx].replace('{est}', '~8 minutes')}
-                  </span>
-                </div>
               </div>
 
               {/* Seedance tip card */}
@@ -2953,50 +3009,60 @@ ${shots.join('\n\n')}`
         <button
           onClick={()=>setShowPrompt(v=>!v)}
           style={{
-            background:'none',border:'none',padding:'4px 0',cursor:'pointer',
-            fontSize:11,color:'var(--text-tertiary)',opacity:0.65,
-            textDecoration:'underline',textUnderlineOffset:2,
+            display:'flex',alignItems:'center',gap:7,
+            padding:'8px 14px',borderRadius:9,cursor:'pointer',
+            background: showPrompt ? 'rgba(139,92,246,0.08)' : 'var(--bg-tertiary)',
+            border: showPrompt ? '1.5px solid rgba(139,92,246,0.3)' : '1.5px solid var(--border)',
+            color: showPrompt ? '#8B5CF6' : 'var(--text-secondary)',
+            fontSize:12,fontWeight:600,transition:'all 0.15s',
           }}
         >
-          {showPrompt ? 'hide prompt ▲' : 'inspect prompt ▼'}
+          <span style={{fontSize:14,lineHeight:1}}>{'</>'}</span>
+          <span>{showPrompt ? 'Hide prompt' : 'Inspect prompt'}</span>
+          <span style={{fontSize:10,opacity:0.6}}>{showPrompt ? '▲' : '▼'}</span>
         </button>
         {showPrompt && (
           <div style={{
-            marginTop:6,borderRadius:10,border:'1px solid var(--border)',
+            marginTop:8,borderRadius:12,border:'1px solid var(--border)',
             background:'var(--bg)',overflow:'hidden',
           }}>
-            {(dialogue.trim() || environment || productRef1 || productRef2) ? (
+            {lastGeneratedPrompt ? (
               <>
                 <div style={{
-                  display:'flex',justifyContent:'flex-end',padding:'7px 10px',
-                  borderBottom:'1px solid var(--border)',
+                  display:'flex',alignItems:'center',justifyContent:'space-between',
+                  padding:'8px 12px',borderBottom:'1px solid var(--border)',
+                  background:'var(--bg-tertiary)',
                 }}>
+                  <span style={{fontSize:11,color:'var(--text-tertiary)',fontWeight:500}}>
+                    Last generated prompt
+                  </span>
                   <button
                     onClick={()=>{
-                      navigator.clipboard.writeText(buildPrompt()).then(()=>{
+                      navigator.clipboard.writeText(lastGeneratedPrompt).then(()=>{
                         setCopied(true); setTimeout(()=>setCopied(false),2000)
                       })
                     }}
                     style={{
-                      padding:'5px 14px',borderRadius:7,fontSize:12,fontWeight:600,
+                      padding:'4px 12px',borderRadius:6,fontSize:11,fontWeight:600,
                       background: copied ? 'rgba(34,197,94,0.12)' : 'var(--bg)',
                       color: copied ? '#22C55E' : 'var(--text-secondary)',
                       border: copied ? '1px solid rgba(34,197,94,0.3)' : '1px solid var(--border)',
+                      cursor:'pointer',transition:'all 0.15s',
                     }}
                   >{copied ? '✓ Copied' : 'Copy'}</button>
                 </div>
                 <pre style={{
                   margin:0,padding:'14px 16px',fontSize:11.5,lineHeight:1.7,
                   color:'var(--text-secondary)',whiteSpace:'pre-wrap',wordBreak:'break-word',
-                  fontFamily:'inherit',maxHeight:320,overflowY:'auto',
-                }}>{buildPrompt()}</pre>
+                  fontFamily:'inherit',maxHeight:360,overflowY:'auto',
+                }}>{lastGeneratedPrompt}</pre>
               </>
             ) : (
               <div style={{
                 padding:'22px 16px',textAlign:'center',
                 color:'var(--text-tertiary)',fontSize:12,lineHeight:1.6,
               }}>
-                Add a script or products above to preview the prompt
+                Generate a video or select a recent entry to inspect its prompt
               </div>
             )}
           </div>
@@ -3227,7 +3293,7 @@ export default function Influencers() {
           {influencers.length===0&&(
             <div style={{padding:'24px 8px',textAlign:'center',color:SD.dim,fontSize:13}}>No influencers yet</div>
           )}
-          {influencers.map(inf=>{
+          {[...influencers].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).map(inf=>{
             const pct=completeness(inf)
             const active=influencer?.id===inf.id
             const gc=gColor(inf.gender)
@@ -3314,6 +3380,39 @@ export default function Influencers() {
           )}
 
           {studioTab==='influencer' && <>
+
+          {/* ── Empty state CTA — shown when influencer has no main image yet */}
+          {!influencer.mainImage && (
+            <div style={{
+              borderRadius:18,padding:'36px 28px',textAlign:'center',
+              background:'linear-gradient(135deg,rgba(236,72,153,0.06),rgba(139,92,246,0.08))',
+              border:'1.5px dashed rgba(139,92,246,0.3)',
+            }}>
+              <div style={{fontSize:38,marginBottom:12,lineHeight:1}}>✦</div>
+              <div style={{fontSize:20,fontWeight:700,color:'var(--text-primary)',marginBottom:6,letterSpacing:'-0.3px'}}>
+                {influencer.name} has no images yet
+              </div>
+              <div style={{fontSize:14,color:'var(--text-tertiary)',marginBottom:24,lineHeight:1.6}}>
+                Go through the creation flow to generate photos, set their appearance, and build their identity.
+              </div>
+              <button
+                onClick={() => navigate('/create', { state: { replaceId: influencer.id, prefillName: influencer.name, prefillGender: influencer.gender } })}
+                style={{
+                  display:'inline-flex',alignItems:'center',gap:10,
+                  padding:'13px 28px',borderRadius:12,fontSize:15,fontWeight:700,
+                  background:'linear-gradient(135deg,#EC4899,#8B5CF6)',color:'#fff',
+                  border:'none',cursor:'pointer',
+                  boxShadow:'0 4px 20px rgba(139,92,246,0.4)',
+                  transition:'transform 0.15s,box-shadow 0.15s',
+                }}
+                onMouseEnter={e=>{e.currentTarget.style.transform='translateY(-2px)';e.currentTarget.style.boxShadow='0 6px 28px rgba(139,92,246,0.5)'}}
+                onMouseLeave={e=>{e.currentTarget.style.transform='';e.currentTarget.style.boxShadow='0 4px 20px rgba(139,92,246,0.4)'}}
+              >
+                ✦ Generate your influencer
+              </button>
+            </div>
+          )}
+
           {/* Hero banner */}
           <HeroBanner influencer={influencer} pct={pct} onDelete={()=>del(influencer.id)}/>
 

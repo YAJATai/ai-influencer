@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { flushSync } from 'react-dom'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { useInfluencers, generateId } from '../store'
 import { buildThreeVariationPrompts } from '../utils/systemPrompt'
 import { generateThreeImages } from '../utils/higgsfieldGenerate'
@@ -1479,10 +1479,12 @@ function Step5({ data, onFinish, onReset, hfConnected, onConnected }) {
 // ── Main wizard ───────────────────────────────────────────────
 export default function Create() {
   const navigate = useNavigate()
+  const location = useLocation()
   const [, setInfluencers] = useInfluencers()
   const [step, setStep] = useState(1)
+  const prefill = location.state || {}
   const [data, setData] = useState({
-    name: '', gender: '', age: '', niches: [], nicheCustom: '',
+    name: prefill.prefillName || '', gender: prefill.prefillGender || '', age: '', niches: [], nicheCustom: '',
     backstory: '', personality: 50,
     ethnicity: '', skinTone: '', hairColor: '', hairLength: 'Long', hairTexture: 'Straight',
     eyeColor: '', build: '', uniqueFeatures: '',
@@ -1542,9 +1544,10 @@ export default function Create() {
     const niches = (data.niches || []).filter(n => n !== 'Other')
 
     const otherVariations = variations.filter((_, i) => i !== selectedIdx)
+    const replaceId = prefill.replaceId || null
 
     const newInf = {
-      id: generateId(), name: data.name.trim(), gender: data.gender, age: data.age,
+      id: replaceId || generateId(), name: data.name.trim(), gender: data.gender, age: data.age,
       type: 'Influencer', createdAt: Date.now(),
       niche: niches.join(', ') || '',
       niches: data.niches || [], nicheCustom: data.nicheCustom,
@@ -1581,7 +1584,11 @@ export default function Create() {
       backstory: data.backstory || '',
     })
     flushSync(() => {
-      setInfluencers(prev => [...prev, newInf])
+      if (replaceId) {
+        setInfluencers(prev => prev.map(i => i.id === replaceId ? { ...i, ...newInf } : i))
+      } else {
+        setInfluencers(prev => [...prev, newInf])
+      }
     })
     navigate('/influencers', { state: { selectId: newInf.id } })
   }
