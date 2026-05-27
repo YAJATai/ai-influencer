@@ -1,9 +1,24 @@
 export const config = { runtime: 'edge' }
 
+// Only forward requests to known Higgsfield MCP paths
+const ALLOWED_PATH_PREFIXES = [
+  '/oauth2/',
+  '/mcp',
+  '/v1/',
+]
+
+function isAllowedPath(path) {
+  return ALLOWED_PATH_PREFIXES.some(p => path.startsWith(p))
+}
+
 export default async function handler(req) {
-  // Strip '/api/hf' prefix, forward everything else to Higgsfield
   const url = new URL(req.url)
   const path = url.pathname.replace(/^\/api\/hf/, '') || '/'
+
+  if (!isAllowedPath(path)) {
+    return new Response('Not found', { status: 404 })
+  }
+
   const target = `https://mcp.higgsfield.ai${path}${url.search}`
 
   // CORS preflight
