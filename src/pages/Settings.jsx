@@ -1,6 +1,4 @@
-import { useState, useEffect } from 'react'
-import { useLocation } from 'react-router-dom'
-import { startHiggsfieldOAuthPopup, disconnectHF, isHFConnected } from '../utils/higgsfieldAuth'
+import { useState } from 'react'
 import { useTheme } from '../context/theme'
 
 function Section({ title, children }) {
@@ -17,37 +15,10 @@ function Section({ title, children }) {
 const CLAUDE_KEY = 'claude_api_key'
 
 export default function Settings() {
-  const location = useLocation()
   const { theme, toggle } = useTheme()
-  const [hfConnected, setHfConnected] = useState(isHFConnected)
-  const [hfLoading, setHfLoading] = useState(false)
   const [claudeKey, setClaudeKey] = useState(() => localStorage.getItem(CLAUDE_KEY) || '')
   const [claudeInput, setClaudeInput] = useState('')
   const [showClaudeInput, setShowClaudeInput] = useState(false)
-  useEffect(() => {
-    const params = new URLSearchParams(location.search)
-    if (params.get('connected') === '1') {
-      setHfConnected(true)
-    }
-  }, [location.search])
-
-  async function connectHiggsfield() {
-    setHfLoading(true)
-    try {
-      await startHiggsfieldOAuthPopup()
-      setHfConnected(true)
-    } catch (e) {
-      if (e.message !== 'cancelled') alert('Failed to connect Higgsfield: ' + e.message)
-    } finally {
-      setHfLoading(false)
-    }
-  }
-
-  function disconnectHighgsfield() {
-    if (!confirm('Disconnect your Higgsfield account?')) return
-    disconnectHF()
-    setHfConnected(false)
-  }
 
   return (
     <div style={{ paddingTop: 'var(--nav-h)', minHeight: '100vh', background: 'var(--bg)' }}>
@@ -89,37 +60,14 @@ export default function Settings() {
           </div>
         </Section>
 
-        <Section title="Higgsfield">
+        <Section title="AI Generation">
           <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.6 }}>
-            Connect your Higgsfield account to generate influencer images directly in the app. Images use your own Higgsfield credits.
+            HuggingFace Mode Active
           </p>
-          {hfConnected ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#34C759' }} />
-                <span style={{ fontSize: 13, fontWeight: 600, color: '#34C759' }}>Higgsfield connected</span>
-              </div>
-              <button onClick={disconnectHighgsfield} style={{ padding: '7px 14px', borderRadius: 8, fontSize: 13, color: '#FF3B30', background: 'rgba(255,59,48,0.08)', border: '1px solid rgba(255,59,48,0.18)', fontWeight: 500 }}>
-                Disconnect
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={connectHiggsfield}
-              disabled={hfLoading}
-              style={{ padding: '10px 20px', borderRadius: 8, fontSize: 14, fontWeight: 600, background: '#1D1D1F', color: '#fff', display: 'flex', alignItems: 'center', gap: 8, opacity: hfLoading ? 0.6 : 1 }}
-            >
-              {hfLoading ? (
-                <>
-                  <div style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', animation: 'spin 0.7s linear infinite' }} />
-                  Connecting…
-                </>
-              ) : (
-                'Connect Higgsfield'
-              )}
-              <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
-            </button>
-          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#34C759' }} />
+            <span style={{ fontSize: 13, fontWeight: 600, color: '#34C759' }}>Connected via HuggingFace Inference API</span>
+          </div>
         </Section>
 
         <Section title="Claude AI">

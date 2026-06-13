@@ -100,8 +100,64 @@ const claudePlugin = {
   },
 }
 
+// Local dev HF generate proxy — mirrors api/generate-image.js for Vercel production
+const hfGeneratePlugin = {
+  name: 'hf-generate-proxy',
+  configureServer(server) {
+    server.middlewares.use('/api/generate-image', async (req, res) => {
+      res.setHeader('Access-Control-Allow-Origin', '*')
+      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+      if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return }
+      if (req.method !== 'POST') { res.writeHead(405); res.end('Method not allowed'); return }
+
+      const token = process.env.HF_TOKEN
+      if (!token) {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'HF_TOKEN not set locally. Add HF_TOKEN to your .env' }))
+        return
+      }
+
+      const chunks = []
+      req.on('data', c => chunks.push(c))
+      await new Promise(r => req.on('end', r))
+      const body = Buffer.concat(chunks).toString()
+
+      try {
+        const upstream = await fetch('https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body,
+        })
+
+        if (!upstream.ok) {
+          const text = await upstream.text().catch(() => '')
+          res.writeHead(upstream.status, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `HuggingFace API error ${upstream.status}`, detail: text.slice(0, 500) }))
+          return
+        }
+
+        const buf = Buffer.from(await upstream.arrayBuffer())
+        res.writeHead(200, {
+          'Content-Type': upstream.headers.get('content-type') || 'image/webp',
+          'Cache-Control': 'public, max-age=86400',
+          'Content-Length': String(buf.length),
+        })
+        res.end(buf)
+      } catch (e) {
+        console.error('[hf-generate-dev]', e)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: e.message || 'Internal error' }))
+      }
+    })
+  },
+}
+
 export default defineConfig({
-  plugins: [react(), searchPlugin, imgProxyPlugin, claudePlugin],
+  plugins: [react(), searchPlugin, imgProxyPlugin, claudePlugin, hfGeneratePlugin],
   server: {
     proxy: {
       '/api/hf': {

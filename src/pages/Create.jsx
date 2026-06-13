@@ -5,7 +5,6 @@ import { useInfluencers, generateId } from '../store'
 import { buildThreeVariationPrompts } from '../utils/systemPrompt'
 import { analyzeBackstory } from '../utils/backstoryAnalysis'
 import { generateThreeImages } from '../utils/higgsfieldGenerate'
-import { isHFConnected, startHiggsfieldOAuthPopup } from '../utils/higgsfieldAuth'
 import { compressImage } from '../utils/imageUtils'
 import { gColor } from '../utils/influencerUtils'
 
@@ -29,10 +28,7 @@ const VIBE_OPTIONS = [
 const STEPS = ['Basics', 'References', 'Story', 'Look', 'Generate']
 
 const MODELS = [
-  { id: 'soul_2',            name: 'Higgsfield Soul', tag: 'Influencer-Native',   tagColor: '#EC4899', provider: 'higgsfield',              desc: 'Native model for fashion and UGC.',          maxRefs: 1 },
-  { id: 'gpt_image_2',       name: 'GPT Image 2',     tag: 'Max Quality',         tagColor: '#10B981', provider: 'openai',                  desc: 'Highest quality output, maximum realism.',   maxRefs: 2 },
-  { id: 'nano_banana_2',     name: 'Nano Banana Pro', tag: 'Sharpest Detail',     tagColor: '#8B5CF6', provider: 'banana', version: 'Pro', desc: 'Maximum detail and portrait precision.',     maxRefs: 2 },
-  { id: 'nano_banana_flash', name: 'Nano Banana 2',   tag: 'Fastest',             tagColor: '#0EA5E9', provider: 'banana', version: '2',   desc: 'Rapid results, still premium quality.',      maxRefs: 2 },
+  { id: 'flux', name: 'HuggingFace FLUX', tag: 'Free', tagColor: '#10B981', provider: 'huggingface', desc: 'FLUX.1-schnell — fast, free, high quality.', maxRefs: 2 },
 ]
 const MODEL_PREF_KEY = 'aiis_model_pref'
 
@@ -1211,56 +1207,20 @@ function VariationCard({ url, selected, gc, onSelect, index, landscape, onExpand
   )
 }
 
-function ProviderIcon({ provider, version }) {
-  if (provider === 'banana') return (
-    <div style={{ position: 'relative', width: 36, height: 36, flexShrink: 0 }}>
-      <div style={{ width: 36, height: 36, borderRadius: 10, background: '#FFFBEB', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 19, lineHeight: 1 }}>🍌</div>
-      <div style={{ position: 'absolute', bottom: -3, right: -5, background: '#D97706', color: '#fff', fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 6, lineHeight: 1.6, whiteSpace: 'nowrap', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }}>{version}</div>
-    </div>
-  )
-  if (provider === 'openai') return (
-    <div style={{ width: 36, height: 36, borderRadius: 10, background: 'var(--bg-tertiary)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-      <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" style={{ color: 'var(--text-primary)' }}>
-        <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
-      </svg>
-    </div>
-  )
-  return <img src="/hf-icon.png" alt="" style={{ width: 36, height: 36, borderRadius: 10, display: 'block', flexShrink: 0 }} />
-}
+
 
 // ── Step 5: Generate ──────────────────────────────────────────
-function Step5({ data, onFinish, onReset, hfConnected, onConnected }) {
+function Step5({ data, onFinish, onReset }) {
   const [phase, setPhase] = useState('idle')
   const [genProgress, setGenProgress] = useState(0)
   const [genError, setGenError] = useState(null)
   const [variations, setVariations] = useState([])
   const [selected, setSelected] = useState(null)
   const [lightboxUrl, setLightboxUrl] = useState(null)
-  const [connectingHF, setConnectingHF] = useState(false)
   const [generatedPrompts, setGeneratedPrompts] = useState([])
   const [aspectRatio, setAspectRatio] = useState('9:16')
   const backstoryCtxRef = useRef(null)
-  const [model, setModel] = useState(() => {
-    const saved = localStorage.getItem(MODEL_PREF_KEY)
-    return MODELS.find(m => m.id === saved) ? saved : 'gpt_image_2'
-  })
-  const userModelRef = useRef(model)
-
-  function pickModel(id) {
-    setModel(id)
-    userModelRef.current = id
-    localStorage.setItem(MODEL_PREF_KEY, id)
-  }
-  const gc = gColor(data.gender)
-  const hasRef = !!(data.faceRef || data.styleRef)
-
-  useEffect(() => {
-    if (hasRef && model === 'soul_2') {
-      setModel('gpt_image_2')
-    } else if (!hasRef && userModelRef.current === 'soul_2' && model !== 'soul_2') {
-      setModel('soul_2')
-    }
-  }, [hasRef]) // eslint-disable-line react-hooks/exhaustive-deps
+  const model = 'flux'
 
   async function generate() {
     setPhase('generating'); setGenError(null); setVariations([]); setSelected(null); setGenProgress(5); setLightboxUrl(null)
@@ -1303,31 +1263,6 @@ function Step5({ data, onFinish, onReset, hfConnected, onConnected }) {
     }
   }
 
-  if (!hfConnected) {
-    return (
-      <div>
-        <div style={{ marginBottom: 32 }}>
-          <h2 style={{ fontSize: 32, fontWeight: 800, letterSpacing: '-1px', color: L.text, marginBottom: 8 }}>Connect Higgsfield to generate</h2>
-        </div>
-        <div style={{ background: 'rgba(201,255,0,0.06)', border: '1.5px solid rgba(201,255,0,0.35)', borderRadius: 18, padding: '24px' }}>
-          <button
-            onClick={doConnect}
-            disabled={connectingHF}
-            style={{ padding: '10px 22px', borderRadius: 10, background: 'linear-gradient(135deg,#EC4899,#8B5CF6)', color: '#fff', fontSize: 14, fontWeight: 700, border: 'none', cursor: connectingHF ? 'default' : 'pointer', opacity: connectingHF ? 0.7 : 1, display: 'flex', alignItems: 'center', gap: 8 }}
-          >
-            {connectingHF ? (
-              <>
-                <div style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', animation: 'spin 0.7s linear infinite' }} />
-                Connecting…
-              </>
-            ) : 'Connect Higgsfield'}
-            <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
-          </button>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div>
       {phase !== 'generating' && (
@@ -1343,47 +1278,14 @@ function Step5({ data, onFinish, onReset, hfConnected, onConnected }) {
 
       {phase === 'idle' && (
         <div>
-          {/* Model picker — main focus */}
-          <div style={{ fontSize: 11, fontWeight: 700, color: L.textFaint, textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: 10 }}>Generation Engine</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 20 }}>
-            {MODELS.map(m => {
-              const on = model === m.id
-              const blocked = m.id === 'soul_2' && hasRef
-              return (
-                <button key={m.id} onClick={() => !blocked && pickModel(m.id)} style={{
-                  padding: '12px 14px', borderRadius: 12, textAlign: 'left', position: 'relative',
-                  cursor: blocked ? 'not-allowed' : 'pointer',
-                  opacity: blocked ? 0.45 : 1,
-                  border: `1.5px solid ${blocked ? 'rgba(255,59,48,0.22)' : on ? '#8B5CF6' : L.border}`,
-                  background: blocked ? 'rgba(255,59,48,0.04)' : on ? 'rgba(139,92,246,0.08)' : L.surfaceAlt,
-                  boxShadow: on && !blocked ? '0 0 0 1px rgba(139,92,246,0.15), 0 2px 12px rgba(139,92,246,0.10)' : 'none',
-                  display: 'flex', alignItems: 'flex-start', gap: 11, transition: 'all 0.15s',
-                }}>
-                  {m.id === 'gpt_image_2' && (
-                    <>
-                      <style>{`@keyframes rec-pulse{0%,100%{box-shadow:0 0 0 0 rgba(139,92,246,0.55)}60%{box-shadow:0 0 0 5px rgba(139,92,246,0)}}`}</style>
-                      <div style={{
-                        position: 'absolute', top: -7, right: -7,
-                        background: 'linear-gradient(135deg,#EC4899,#8B5CF6)',
-                        borderRadius: 20, padding: '3px 8px',
-                        fontSize: 9, fontWeight: 800, color: '#fff',
-                        letterSpacing: '0.5px', textTransform: 'uppercase',
-                        animation: 'rec-pulse 2s ease-out infinite',
-                        pointerEvents: 'none',
-                      }}>✦ Best</div>
-                    </>
-                  )}
-                  <ProviderIcon provider={m.provider} version={m.version} />
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: blocked ? '#FF3B30' : on ? '#8B5CF6' : L.text, marginBottom: 4, lineHeight: 1.2 }}>{m.name}</div>
-                    {blocked
-                      ? <div style={{ fontSize: 10.5, color: '#FF3B30', fontWeight: 600, lineHeight: 1.3 }}>Not compatible with references</div>
-                      : <div style={{ fontSize: 10.5, color: L.textFaint, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.desc}</div>
-                    }
-                  </div>
-                </button>
-              )
-            })}
+          {/* Model badge */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: L.textFaint, textTransform: 'uppercase', letterSpacing: '0.6px' }}>Engine</span>
+            <div style={{
+              padding: '5px 12px', borderRadius: 20,
+              background: 'rgba(16,185,129,0.10)', border: '1.5px solid rgba(16,185,129,0.3)',
+              fontSize: 12, fontWeight: 600, color: '#10B981',
+            }}>HuggingFace FLUX</div>
           </div>
 
           {/* Aspect ratio — secondary, compact */}
@@ -1566,8 +1468,6 @@ export default function Create() {
 
   const [shakeContinue, setShakeContinue] = useState(false)
   const [ageErrorPulse, setAgeErrorPulse] = useState(false)
-  const [hfConnected, setHfConnected] = useState(isHFConnected)
-
   function set(k, v) { setData(prev => ({ ...prev, [k]: v })) }
 
   const FEMALE_ONLY_VIBES = ['Clean Girl', 'Cottagecore']
@@ -1596,15 +1496,6 @@ export default function Create() {
       return
     }
     setStep(s => s + 1)
-  }
-
-  async function connectFromBanner() {
-    try {
-      await startHiggsfieldOAuthPopup()
-      setHfConnected(true)
-    } catch (e) {
-      if (e.message !== 'cancelled') alert('Failed to connect: ' + e.message)
-    }
   }
 
   function resetAll() {
@@ -1699,34 +1590,7 @@ export default function Create() {
       <div style={{ width: '100%', maxWidth: 548, padding: '40px 24px 100px', position: 'relative', zIndex: 2 }}>
         <StepIndicator current={step} />
 
-        {!hfConnected && step < 5 && (
-          <div style={{
-            marginBottom: 32, borderRadius: 14, padding: '1.5px',
-            background: '#C9FF00',
-            animation: 'hf-float 3s ease-in-out infinite',
-            boxShadow: '0 4px 24px rgba(201,255,0,0.25)',
-          }}>
-            <div style={{
-              borderRadius: 13, padding: '11px 14px',
-              background: 'color-mix(in srgb, var(--bg) 92%, #C9FF00 8%)',
-              backdropFilter: 'blur(12px)',
-              display: 'flex', alignItems: 'center', gap: 10,
-            }}>
-              <img src="/hf-icon.png" alt="" style={{ width: 32, height: 32, borderRadius: 9, flexShrink: 0, boxShadow: '0 2px 8px rgba(201,255,0,0.5)', display: 'block' }} />
-              <span style={{ flex: 1, fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>Connect to Higgsfield</span>
-              <button onClick={connectFromBanner} style={{
-                flexShrink: 0, padding: '7px 14px', borderRadius: 8,
-                background: '#C9FF00',
-                color: '#0A0A0A', fontSize: 12, fontWeight: 800, border: 'none', cursor: 'pointer',
-                boxShadow: '0 2px 8px rgba(201,255,0,0.4)',
-                whiteSpace: 'nowrap', transition: 'opacity 0.15s',
-              }}
-                onMouseEnter={e => { e.currentTarget.style.opacity = '0.8' }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = '1' }}
-              >Connect →</button>
-            </div>
-          </div>
-        )}
+
 
         {/* Claude API key nudge — same card DNA as HF, visually secondary */}
         {step === 1 && !localStorage.getItem('claude_api_key') && (
@@ -1766,7 +1630,7 @@ export default function Create() {
         {step === 2 && <Step2 data={data} set={set} />}
         {step === 3 && <Step3 data={data} set={set} />}
         {step === 4 && <Step4 data={data} set={set} />}
-        {step === 5 && <Step5 data={data} onFinish={finish} onReset={resetAll} hfConnected={hfConnected} onConnected={() => setHfConnected(true)} />}
+        {step === 5 && <Step5 data={data} onFinish={finish} onReset={resetAll} />}
 
         {!isLastStep && (
           <div style={{ display: 'flex', gap: 10, marginTop: 36 }}>
