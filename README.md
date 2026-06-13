@@ -66,4 +66,4 @@ users still bring their own Higgsfield account.
 
 ---
 
-Made by Dan Kieft.
+Made by Yajat Kapoor.
