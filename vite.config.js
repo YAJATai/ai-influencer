@@ -124,7 +124,7 @@ const hfGeneratePlugin = {
       const body = Buffer.concat(chunks).toString()
 
       try {
-        const upstream = await fetch('https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell', {
+        const upstream = await fetch('https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell', {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
